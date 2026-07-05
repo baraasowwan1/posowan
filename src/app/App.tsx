@@ -3830,17 +3830,18 @@ export default function App({
 }: AppProps = {}) {
   // Determine initial screen
   // ── Read saved session immediately (before first render) ────────────────
+  // No token required — useEffect will verify token in background
   function getSavedSession(): { user: AppUser | null; screen: Screen } {
     if (initialPlatformUser) return { user: initialPlatformUser, screen: "platform-dashboard" };
     if (initialUser) return { user: initialUser, screen: "dashboard" };
     try {
-      const token = localStorage.getItem("pos_token");
       const saved = localStorage.getItem("sowwan_pos_currentUser");
-      if (!token || !saved) return { user: null, screen: "login" };
+      if (!saved) return { user: null, screen: "login" };
       const user: AppUser = JSON.parse(saved);
-      if (!user?.id) return { user: null, screen: "login" };
-      const screen: Screen = user.role === "مالك المنصة" ? "platform-dashboard" : "dashboard";
-      return { user, screen };
+      // Validate saved user has required fields
+      if (!user || !user.role || !user.username) return { user: null, screen: "login" };
+      const scr: Screen = user.role === "مالك المنصة" ? "platform-dashboard" : "dashboard";
+      return { user, screen: scr };
     } catch { return { user: null, screen: "login" }; }
   }
   const _initSession = getSavedSession();
@@ -3906,25 +3907,28 @@ export default function App({
 
   // ── On mount: verify token + refresh from MongoDB ────────────────────────
   useEffect(() => {
-    const token = localStorage.getItem("pos_token");
     const savedUser = _initSession.user;
-    if (!token || !savedUser) return;
+    if (!savedUser) return; // no session to restore
 
+    const token = localStorage.getItem("pos_token");
     const BASE = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+
+    // If no token (offline login), keep session as-is from localStorage
+    if (!token) return;
+
     const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
-    fetch(`${BASE}/auth/me`, { headers })
+    // Verify token with API (background, non-blocking)
+    fetch(`${BASE}/auth/me`, { headers, signal: AbortSignal.timeout(8000) })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data?.user) {
-          // Token expired → force logout
+          // Token expired → clear only token, keep user for offline fallback
           localStorage.removeItem("pos_token");
-          localStorage.removeItem("sowwan_pos_currentUser");
-          setCurrentUser(null);
-          setScreen("login");
+          // Don't force logout — user might be offline; keep session
           return;
         }
-        // Token valid → pull fresh data from MongoDB
+        // Token valid → pull fresh MongoDB data in background
         if (savedUser.role === "مالك المنصة") {
           fetch(`${BASE}/platform/stores`, { headers })
             .then(r => r.json()).then(d => { if (Array.isArray(d.data)) setTenantStores(d.data); }).catch(() => {});
@@ -3932,7 +3936,7 @@ export default function App({
             .then(r => r.json()).then(d => { if (Array.isArray(d.data)) setUsers(d.data); }).catch(() => {});
         }
       })
-      .catch(() => { /* offline — keep localStorage data */ });
+      .catch(() => { /* offline — keep localStorage session */ });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function handleSaleComplete(sale: Sale) {
