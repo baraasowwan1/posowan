@@ -3829,16 +3829,26 @@ export default function App({
   onPlatformLogout,
 }: AppProps = {}) {
   // Determine initial screen
-  const getInitialScreen = (): Screen => {
-    if (initialPlatformUser) return "platform-dashboard";
-    if (initialUser) return "dashboard";
-    return "login";
-  };
+  // ── Read saved session immediately (before first render) ────────────────
+  function getSavedSession(): { user: AppUser | null; screen: Screen } {
+    if (initialPlatformUser) return { user: initialPlatformUser, screen: "platform-dashboard" };
+    if (initialUser) return { user: initialUser, screen: "dashboard" };
+    try {
+      const token = localStorage.getItem("pos_token");
+      const saved = localStorage.getItem("sowwan_pos_currentUser");
+      if (!token || !saved) return { user: null, screen: "login" };
+      const user: AppUser = JSON.parse(saved);
+      if (!user?.id) return { user: null, screen: "login" };
+      const screen: Screen = user.role === "مالك المنصة" ? "platform-dashboard" : "dashboard";
+      return { user, screen };
+    } catch { return { user: null, screen: "login" }; }
+  }
+  const _initSession = getSavedSession();
 
-  const [screen, setScreen] = useState<Screen>(getInitialScreen);
+  const [screen, setScreen] = useState<Screen>(_initSession.screen);
   const [collapsed, setCollapsed] = useState(false);
   const [isDark, setIsDark] = useState(true);
-  const [currentUser, setCurrentUser] = useState<AppUser | null>(initialPlatformUser ?? initialUser ?? null);
+  const [currentUser, setCurrentUser] = useState<AppUser | null>(_initSession.user);
   // ── localStorage helpers ─────────────────────────────────────────────────
   function lsGet<T>(key: string, fallback: T): T {
     try {
@@ -3894,51 +3904,36 @@ export default function App({
   useEffect(() => { lsSet("storeDataMap", storeDataMap); }, [storeDataMap]);
   useEffect(() => { if (currentUser) lsSet("currentUser", currentUser); }, [currentUser]);
 
-  // ── Restore session on page load ─────────────────────────────────────────
-  // If JWT token exists → verify with API and reload stores/users from MongoDB
+  // ── On mount: verify token + refresh from MongoDB ────────────────────────
   useEffect(() => {
-    const BASE = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
     const token = localStorage.getItem("pos_token");
-    const savedUser = lsGet<AppUser | null>("currentUser", null);
+    const savedUser = _initSession.user;
+    if (!token || !savedUser) return;
 
-    if (!token || !savedUser) return; // no saved session
-
-    // Restore user immediately from localStorage (instant UI)
-    setCurrentUser(savedUser);
-    if (savedUser.role === "مالك المنصة") setScreen("platform-dashboard");
-    else setScreen("dashboard");
-
-    // Then verify token with API and refresh data from MongoDB
+    const BASE = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
     const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
     fetch(`${BASE}/auth/me`, { headers })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data?.user) {
-          // Token expired — clear session
+          // Token expired → force logout
           localStorage.removeItem("pos_token");
-          lsSet("currentUser", null);
+          localStorage.removeItem("sowwan_pos_currentUser");
           setCurrentUser(null);
           setScreen("login");
           return;
         }
-        // Token valid — refresh stores and users from MongoDB
+        // Token valid → pull fresh data from MongoDB
         if (savedUser.role === "مالك المنصة") {
           fetch(`${BASE}/platform/stores`, { headers })
-            .then(r => r.json())
-            .then(d => { if (Array.isArray(d.data)) setTenantStores(d.data); })
-            .catch(() => {});
-
+            .then(r => r.json()).then(d => { if (Array.isArray(d.data)) setTenantStores(d.data); }).catch(() => {});
           fetch(`${BASE}/users`, { headers })
-            .then(r => r.json())
-            .then(d => { if (Array.isArray(d.data)) setUsers(d.data); })
-            .catch(() => {});
+            .then(r => r.json()).then(d => { if (Array.isArray(d.data)) setUsers(d.data); }).catch(() => {});
         }
       })
-      .catch(() => {
-        // API unreachable — keep using localStorage data (offline mode)
-      });
-  }, []); // runs once on mount
+      .catch(() => { /* offline — keep localStorage data */ });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function handleSaleComplete(sale: Sale) {
     setSales(prev => [sale, ...prev]);
