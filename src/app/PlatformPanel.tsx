@@ -10,6 +10,7 @@ import {
 import type { Screen, AppUser, TenantStore, Plan, AuditLog } from "./types";
 import { generateSlug, PLATFORM_DOMAIN, storeLoginUrl } from "./types";
 import { StoreUrlCard } from "./StorePortal";
+import { storesApi, usersApi } from "../lib/useApiData";
 
 // Auto-generate store admin username from store name
 function makeUsername(storeName: string, existingUsernames: string[]): string {
@@ -323,25 +324,27 @@ export function PlatformStoresScreen({ stores: storesProp, setStores, plans: pla
   });
 
   function toggleStatus(id: string) {
-    setStores(prev => prev.map(s => s.id === id ? { ...s, status: s.status === "active" ? "suspended" : "active" } : s));
+    const store = stores.find(s => s.id === id);
+    const newStatus = store?.status === "active" ? "suspended" : "active";
+    setStores(prev => prev.map(s => s.id === id ? { ...s, status: newStatus as any } : s));
+    storesApi.toggle(id, newStatus).catch(() => {});
     toast.success("تم تحديث حالة المتجر");
   }
 
   function deleteStore(id: string) {
     const store = stores.find(s => s.id === id);
     setStores(prev => prev.filter(s => s.id !== id));
-    // Remove all users belonging to this store
-    if (store?.slug) {
-      setUsers(prev => prev.filter(u => u.storeSlug !== store.slug));
-    }
+    if (store?.slug) setUsers(prev => prev.filter(u => u.storeSlug !== store.slug));
+    storesApi.delete(id).catch(() => {});
     setDeleteId(null);
     toast.success("تم حذف المتجر ومستخدميه");
   }
 
-  function saveStore(data: Partial<TenantStore>) {
+  async function saveStore(data: Partial<TenantStore>) {
     const now = new Date().toISOString().split("T")[0];
     if (editStore) {
       setStores(prev => prev.map(s => s.id === editStore.id ? { ...s, ...data, updatedAt: now } : s));
+      storesApi.update(editStore.id, { ...data, updatedAt: now }).catch(() => {});
       toast.success("تم تحديث بيانات المتجر");
       setShowModal(false); setEditStore(null);
       return;
@@ -352,8 +355,7 @@ export function PlatformStoresScreen({ stores: storesProp, setStores, plans: pla
     const slug = generateSlug(data.name ?? "store", stores.map(s => s.slug));
 
     const newStore: TenantStore = {
-      id: `s${Date.now()}`, storeId,
-      name: data.name ?? "", slug,
+      id: `s${Date.now()}`, storeId, name: data.name ?? "", slug,
       customDomain: data.customDomain ?? "",
       ownerName: data.ownerName ?? "", phone: data.phone ?? "", email: data.email ?? "",
       address: data.address ?? "", logo: "", taxNumber: data.taxNumber ?? "",
@@ -371,22 +373,25 @@ export function PlatformStoresScreen({ stores: storesProp, setStores, plans: pla
     const password = makePassword();
 
     const adminUser: AppUser = {
-      id: Date.now(),
-      name: data.ownerName || data.name || "مدير المتجر",
-      email: data.email || `${username}@pos.local`,
-      username,
-      role: "مدير النظام",
-      status: "نشط",
-      lastLogin: "",
-      permissions: 8,
-      password,
-      storeSlug: slug,
+      id: Date.now(), name: data.ownerName || data.name || "مدير المتجر",
+      email: data.email || `${username}@pos.local`, username,
+      role: "مدير النظام", status: "نشط", lastLogin: "",
+      permissions: 8, password, storeSlug: slug,
     };
 
+    // Update local state immediately
     setStores(prev => [newStore, ...prev]);
     setUsers(prev => [...prev, adminUser]);
     setNewCredentials({ storeName: data.name ?? "", username, password });
     setShowModal(false); setEditStore(null);
+
+    // Sync to MongoDB in background
+    storesApi.create(newStore).then(r => {
+      if (r.ok && r.data?._id) {
+        setStores(prev => prev.map(s => s.id === newStore.id ? { ...s, id: r.data._id } : s));
+      }
+    }).catch(() => {});
+    usersApi.create({ ...adminUser, password }).catch(() => {});
   }
 
   return (
