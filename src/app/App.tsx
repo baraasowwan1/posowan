@@ -947,31 +947,62 @@ function DualCSSBarChart({ data, height = 220 }: { data: { day: string; sales: n
 }
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
-function DashboardScreen({ products, sales, setScreen }: { products: Product[]; sales: Sale[]; setScreen: (s: Screen) => void }) {
+function DashboardScreen({ products, sales, setScreen, customers, suppliers }: {
+  products: Product[]; sales: Sale[]; setScreen: (s: Screen) => void;
+  customers?: { length: number }; suppliers?: { length: number };
+}) {
   const lowStock = products.filter(p => p.stock > 0 && p.stock <= p.minStock).length;
   const outOfStock = products.filter(p => p.stock === 0).length;
   const todayStr = new Date().toLocaleDateString("ar-JO", { year: "numeric", month: "long", day: "numeric" });
-  const todaySales = sales.filter(s => s.date === todayStr && s.status === "مكتمل").reduce((a, s) => a + s.amount, 0);
+  const completedSales = sales.filter(s => s.status === "مكتمل");
+  const todaySales = completedSales.filter(s => s.date === todayStr).reduce((a, s) => a + s.amount, 0);
+
+  // Monthly profit — current month completed sales (estimated: 30% margin)
+  const now = new Date();
+  const thisMonth = now.getMonth();
+  const thisYear = now.getFullYear();
+  const monthlyRevenue = completedSales
+    .filter(s => {
+      try {
+        // Try to match by parsing dates or string comparison
+        if (!s.date) return false;
+        // Arabic date string — check if contains current month name
+        const monthNames = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
+        return s.date.includes(monthNames[thisMonth]) || s.date.includes(String(thisYear));
+      } catch { return false; }
+    })
+    .reduce((a, s) => a + s.amount, 0);
+  const monthlyProfit = monthlyRevenue * 0.30; // estimated 30% margin
+
+  // Weekly sales chart — last 7 days
+  const days = ["الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت"];
+  const weekData = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(); d.setDate(d.getDate() - (6 - i));
+    const label = days[d.getDay()];
+    const dayStr = d.toLocaleDateString("ar-JO", { year: "numeric", month: "long", day: "numeric" });
+    const daySales = completedSales.filter(s => s.date === dayStr).reduce((a, s) => a + s.amount, 0);
+    return { day: label, sales: daySales, profit: daySales * 0.3 };
+  });
   return (
     <div className="p-6 space-y-6">
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KPICard title="مبيعات اليوم" value={fmtCurrency(todaySales)} sub={`${sales.filter(s => s.date === "5 يوليو 2026").length} فاتورة`} icon={DollarSign} color="bg-blue-500" trend="up" trendVal="+12.4%" />
-        <KPICard title="الأرباح الشهرية" value="JOD 38,200.000" sub="هامش 34%" icon={TrendingUp} color="bg-emerald-500" trend="up" trendVal="+8.1%" />
-        <KPICard title="إجمالي الطلبات" value={fmt(sales.length)} sub="هذا الشهر" icon={ShoppingBag} color="bg-purple-500" trend="up" trendVal="+5.3%" />
-        <KPICard title="المنتجات النشطة" value={fmt(products.filter(p => p.status === "نشط").length)} sub="منتج مسجّل" icon={Package} color="bg-amber-500" />
+        <KPICard title="مبيعات اليوم" value={fmtCurrency(todaySales)} sub={`${completedSales.filter(s => s.date === todayStr).length} فاتورة`} icon={DollarSign} color="bg-blue-500" />
+        <KPICard title="أرباح هذا الشهر" value={fmtCurrency(monthlyProfit)} sub={`إيراد ${fmtCurrency(monthlyRevenue)}`} icon={TrendingUp} color="bg-emerald-500" />
+        <KPICard title="إجمالي المبيعات" value={fmt(completedSales.length)} sub={`${sales.filter(s => s.status === "معلق").length} معلق`} icon={ShoppingBag} color="bg-purple-500" />
+        <KPICard title="المنتجات النشطة" value={fmt(products.filter(p => p.status !== "نفد المخزون").length)} sub={`من ${products.length} منتج`} icon={Package} color="bg-amber-500" />
       </div>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div onClick={() => setScreen("customers")} className="cursor-pointer"><KPICard title="العملاء المسجّلون" value="482" icon={Users} color="bg-cyan-500" /></div>
+        <div onClick={() => setScreen("customers")} className="cursor-pointer"><KPICard title="العملاء المسجّلون" value={fmt(customers?.length ?? 0)} sub="عميل" icon={Users} color="bg-cyan-500" /></div>
         <div onClick={() => setScreen("inventory")} className="cursor-pointer"><KPICard title="مخزون منخفض" value={fmt(lowStock)} sub="منتج" icon={AlertTriangle} color="bg-orange-500" /></div>
         <div onClick={() => setScreen("inventory")} className="cursor-pointer"><KPICard title="نفد المخزون" value={fmt(outOfStock)} sub="منتج" icon={AlertCircle} color="bg-red-500" /></div>
-        <div onClick={() => setScreen("suppliers")} className="cursor-pointer"><KPICard title="الموردون" value="34" sub="نشط" icon={Truck} color="bg-teal-500" /></div>
+        <div onClick={() => setScreen("suppliers")} className="cursor-pointer"><KPICard title="الموردون" value={fmt(suppliers?.length ?? 0)} sub="مورد" icon={Truck} color="bg-teal-500" /></div>
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 bg-card border border-border rounded-2xl p-5">
           <div className="flex items-center justify-between mb-5">
             <div><h3 className="font-bold text-foreground">تحليل المبيعات</h3><p className="text-xs text-muted-foreground">آخر 7 أيام</p></div>
           </div>
-          <DualCSSBarChart data={salesData} height={220} />
+          <DualCSSBarChart data={weekData} height={220} />
         </div>
         <div className="bg-card border border-border rounded-2xl p-5">
           <h3 className="font-bold text-foreground mb-4">المبيعات حسب الفئة</h3>
@@ -4114,7 +4145,7 @@ export default function App({
       );
     }
     switch (screen) {
-      case "dashboard": return <DashboardScreen products={products} sales={sales} setScreen={guardedSetScreen} />;
+      case "dashboard": return <DashboardScreen products={products} sales={sales} setScreen={guardedSetScreen} customers={customers} suppliers={suppliers} />;
       case "pos": return <POSScreen onSaleComplete={handleSaleComplete} products={products} payments={payments} company={company} companyLogo={companyLogo} />;
       case "products": return <ProductsScreen products={products} setProducts={setProducts} />;
       case "inventory": return <InventoryScreen products={products} setProducts={setProducts} />;
