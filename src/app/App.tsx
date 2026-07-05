@@ -19,6 +19,7 @@ import {
 import { toast, Toaster } from "sonner";
 import type { Screen, AppUser, Plan, TenantStore, AuditLog } from "./types";
 import { generateSlug, PLATFORM_DOMAIN, storeLoginUrl } from "./types";
+import { apiLogin, apiLogout, storesApi, usersApi } from "../lib/useApiData";
 import {
   PlatformSidebar, PlatformTopBar,
   PlatformDashboardScreen, PlatformStoresScreen, PlatformUsersScreen,
@@ -397,42 +398,63 @@ function LoginScreen({ onLogin, users, stores }: {
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState<{ msg: string; type: "error" | "suspended" | "inactive" }>({ msg: "", type: "error" });
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError({ msg: "", type: "error" });
     if (!credential.trim() || !password) {
       setError({ msg: "يرجى إدخال اسم المستخدم وكلمة المرور", type: "error" }); return;
     }
+    setLoading(true);
     const cred = credential.trim().toLowerCase();
+
+    // ── Try API login first ────────────────────────────────────────────────
+    try {
+      const { apiLogin: apiLoginFn } = await import("../lib/useApiData");
+      const result = await apiLoginFn(cred, password);
+      if (result.ok && result.user) {
+        setLoading(false);
+        const apiUser: AppUser = {
+          id: result.user.id ?? result.user._id ?? Date.now(),
+          name: result.user.name, email: result.user.email,
+          username: result.user.username || cred,
+          role: result.user.role, status: "نشط",
+          lastLogin: new Date().toLocaleString("ar-JO"),
+          permissions: result.user.permissions ?? 8,
+          password: "", storeSlug: result.user.storeSlug || "",
+        };
+        onLogin(apiUser);
+        return;
+      }
+      // API returned error (wrong password, suspended, etc.)
+      if (result.error && !result.error.includes("اتصال")) {
+        setLoading(false);
+        setError({ msg: result.error, type: "error" }); return;
+      }
+    } catch {}
+
+    // ── Fallback: local users (offline mode) ──────────────────────────────
     const found = users.find(u =>
-      (u.username.toLowerCase() === cred || u.email.toLowerCase() === cred) &&
+      (u.username?.toLowerCase() === cred || u.email.toLowerCase() === cred) &&
       u.password === password
     );
     if (!found) {
-      const exists = users.some(u => u.username.toLowerCase() === cred || u.email.toLowerCase() === cred);
+      setLoading(false);
+      const exists = users.some(u => u.username?.toLowerCase() === cred || u.email.toLowerCase() === cred);
       setError({ msg: exists ? "كلمة المرور غير صحيحة" : "اسم المستخدم غير موجود في النظام", type: "error" }); return;
     }
-    // Check STORE status first (takes priority over user status)
     if (found.role !== "مالك المنصة" && found.storeSlug) {
       const userStore = stores.find(s => s.slug === found.storeSlug);
-      if (userStore) {
-        if (userStore.status === "suspended") {
-          setError({ msg: `متجر "${userStore.name}" موقوف حالياً. تواصل مع إدارة المنصة لإعادة التفعيل.`, type: "suspended" }); return;
-        }
-        if (userStore.status === "inactive") {
-          setError({ msg: `متجر "${userStore.name}" غير نشط. تواصل مع إدارة المنصة.`, type: "suspended" }); return;
-        }
-        if (userStore.subscriptionStatus === "expired") {
-          setError({ msg: `انتهى اشتراك متجر "${userStore.name}". يرجى تجديد الاشتراك.`, type: "suspended" }); return;
-        }
+      if (userStore?.status === "suspended") {
+        setLoading(false);
+        setError({ msg: `متجر "${userStore.name}" موقوف حالياً.`, type: "suspended" }); return;
       }
     }
-    // Then check user account status
     if (found.status !== "نشط") {
+      setLoading(false);
       setError({ msg: "هذا الحساب معطّل. تواصل مع مدير المتجر.", type: "inactive" }); return;
     }
-    setLoading(true);
-    setTimeout(() => { setLoading(false); onLogin(found); }, 750);
+    setLoading(false);
+    onLogin(found);
   }
 
   return (
@@ -3817,9 +3839,21 @@ export default function App({
   const [collapsed, setCollapsed] = useState(false);
   const [isDark, setIsDark] = useState(true);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(initialPlatformUser ?? initialUser ?? null);
-  const [users, setUsers] = useState<AppUser[]>(INIT_USERS);
+  // ── localStorage helpers ─────────────────────────────────────────────────
+  function lsGet<T>(key: string, fallback: T): T {
+    try {
+      const v = localStorage.getItem(`sowwan_pos_${key}`);
+      return v ? (JSON.parse(v) as T) : fallback;
+    } catch { return fallback; }
+  }
+  function lsSet(key: string, value: unknown) {
+    try { localStorage.setItem(`sowwan_pos_${key}`, JSON.stringify(value)); } catch {}
+  }
+
+  // ── Persistent state — survives page reload ───────────────────────────────
+  const [users, setUsers] = useState<AppUser[]>(() => lsGet("users", INIT_USERS));
+
   // ── Per-store isolated data ───────────────────────────────────────────────
-  // Each store slug has its own independent dataset; no cross-store data leaks.
   interface StoreData {
     products: Product[]; customers: Customer[]; suppliers: Supplier[];
     sales: Sale[]; purchases: Purchase[]; expenses: Expense[];
@@ -3832,14 +3866,18 @@ export default function App({
       company: { ...INIT_COMPANY }, companyLogo: "", payments: INIT_PAYMENTS.map(p => ({ ...p })),
     };
   }
-  const [storeDataMap, setStoreDataMap] = useState<Record<string, StoreData>>({});
-  // SaaS / Multi-Tenant state — always local; Router sync is optional
+  const [storeDataMap, setStoreDataMap] = useState<Record<string, StoreData>>(() =>
+    lsGet("storeDataMap", {})
+  );
+
+  // SaaS — always local; persisted in localStorage
   const [tenantStores, setTenantStores] = useState<TenantStore[]>(() => {
     const ext = externalStores;
-    return Array.isArray(ext) && ext.length > 0 ? ext : INIT_STORES;
+    if (Array.isArray(ext) && ext.length > 0) return ext;
+    return lsGet("tenantStores", INIT_STORES);
   });
-  const [plans, setPlans] = useState<Plan[]>(INIT_PLANS);
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(INIT_AUDIT_LOGS);
+  const [plans, setPlans] = useState<Plan[]>(() => lsGet("plans", INIT_PLANS));
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => lsGet("auditLogs", INIT_AUDIT_LOGS));
   const [impersonatingStore, setImpersonatingStore] = useState<TenantStore | null>(null);
 
   useEffect(() => {
@@ -3848,15 +3886,77 @@ export default function App({
     root.classList.toggle("light", !isDark);
   }, [isDark]);
 
+  // ── Auto-save to localStorage on every change ─────────────────────────────
+  useEffect(() => { lsSet("users", users); }, [users]);
+  useEffect(() => { lsSet("tenantStores", tenantStores); }, [tenantStores]);
+  useEffect(() => { lsSet("plans", plans); }, [plans]);
+  useEffect(() => { lsSet("auditLogs", auditLogs); }, [auditLogs]);
+  useEffect(() => { lsSet("storeDataMap", storeDataMap); }, [storeDataMap]);
+  useEffect(() => { if (currentUser) lsSet("currentUser", currentUser); }, [currentUser]);
+
+  // ── Restore session on page load ─────────────────────────────────────────
+  // If JWT token exists → verify with API and reload stores/users from MongoDB
+  useEffect(() => {
+    const BASE = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+    const token = localStorage.getItem("pos_token");
+    const savedUser = lsGet<AppUser | null>("currentUser", null);
+
+    if (!token || !savedUser) return; // no saved session
+
+    // Restore user immediately from localStorage (instant UI)
+    setCurrentUser(savedUser);
+    if (savedUser.role === "مالك المنصة") setScreen("platform-dashboard");
+    else setScreen("dashboard");
+
+    // Then verify token with API and refresh data from MongoDB
+    const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+
+    fetch(`${BASE}/auth/me`, { headers })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data?.user) {
+          // Token expired — clear session
+          localStorage.removeItem("pos_token");
+          lsSet("currentUser", null);
+          setCurrentUser(null);
+          setScreen("login");
+          return;
+        }
+        // Token valid — refresh stores and users from MongoDB
+        if (savedUser.role === "مالك المنصة") {
+          fetch(`${BASE}/platform/stores`, { headers })
+            .then(r => r.json())
+            .then(d => { if (Array.isArray(d.data)) setTenantStores(d.data); })
+            .catch(() => {});
+
+          fetch(`${BASE}/users`, { headers })
+            .then(r => r.json())
+            .then(d => { if (Array.isArray(d.data)) setUsers(d.data); })
+            .catch(() => {});
+        }
+      })
+      .catch(() => {
+        // API unreachable — keep using localStorage data (offline mode)
+      });
+  }, []); // runs once on mount
+
   function handleSaleComplete(sale: Sale) {
     setSales(prev => [sale, ...prev]);
   }
   function handleLogin(user: AppUser) {
     const now = new Date().toLocaleString("ar-JO");
-    setUsers(prev => prev.map(u => u.id === user.id ? { ...u, lastLogin: now } : u));
-    setCurrentUser({ ...user, lastLogin: now });
-    if (user.role === "مالك المنصة") setScreen("platform-dashboard");
-    else setScreen("dashboard");
+    const loggedUser = { ...user, lastLogin: now };
+    setUsers(prev => prev.map(u => u.id === user.id ? loggedUser : u));
+    setCurrentUser(loggedUser);
+    lsSet("currentUser", loggedUser); // persist for reload
+    if (user.role === "مالك المنصة") {
+      setScreen("platform-dashboard");
+      // Reload stores & users from MongoDB
+      storesApi.list().then(r => { if (r.ok && Array.isArray(r.data)) setTenantStores(r.data); });
+      usersApi.list().then(r => { if (r.ok && Array.isArray(r.data)) setUsers(r.data); });
+    } else {
+      setScreen("dashboard");
+    }
   }
 
   function handleImpersonate(store: TenantStore) {
@@ -3872,6 +3972,9 @@ export default function App({
   }
 
   function handleLogout() {
+    // Clear session completely
+    localStorage.removeItem("pos_token");
+    localStorage.removeItem("sowwan_pos_currentUser");
     setCurrentUser(null);
     setScreen("login");
     toast.info("تم تسجيل الخروج بنجاح");
